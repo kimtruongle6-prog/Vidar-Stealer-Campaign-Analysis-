@@ -1,0 +1,101 @@
+import sqlite3
+import pandas as pd
+import requests
+
+# =========================================================
+# 1. DATABASE FORENSIC QUERY
+# =========================================================
+# Establish connection to the forensic database
+conn = sqlite3.connect("Malware_Pro_DB.db")
+
+# Specific query for Vidar: Extracting hashes, file types, and C2 infrastructure
+query_vidar = """
+SELECT 
+    S.malware_name, 
+    S.sha256, 
+    S.type as file_extension,
+    N.connection_address as c2_server,
+    N.time as detection_time
+FROM Samples S
+JOIN Network N ON S.malware_name = N.malware_name
+WHERE S.malware_name = 'Vidar'
+ORDER BY N.time DESC
+"""
+
+df_vidar_profile = pd.read_sql(query_vidar, conn)
+conn.close()
+
+# Display the findings
+print("🎯 VIDAR MALWARE PROFILE")
+print(f"Total infrastructure records detected: {len(df_vidar_profile)}")
+print(df_vidar_profile.head(20).to_string())
+
+
+# =========================================================
+# 2. INFRASTRUCTURE CONCENTRATION ANALYSIS
+# =========================================================
+# Grouping by C2 Server to identify variant distribution patterns
+vidar_c2_analysis = df_vidar_profile.groupby('c2_server').agg({
+    'sha256': 'nunique',
+    'detection_time': ['min', 'max']
+}).reset_index()
+
+vidar_c2_analysis.columns = ['C2 Server', 'Unique Variants', 'First Seen', 'Last Seen']
+
+print("\n🔍 COMMAND & CONTROL (C2) NODE ANALYSIS")
+print(vidar_c2_analysis.sort_values(by='Unique Variants', ascending=False).to_string())
+
+
+# =========================================================
+# 3. FIREWALL BLOCKLIST GENERATION
+# =========================================================
+# Extracting unique IPs/Domains from C2 servers to create a blocklist
+vidar_ips = df_vidar_profile['c2_server'].str.split(':').str[0].unique()
+
+print("\n🛡️ GENERATED FIREWALL/HOSTS BLOCKLIST")
+print("-" * 50)
+for ip in vidar_ips:
+    # Hosts file format: redirecting malicious traffic to 0.0.0.0
+    print(f"0.0.0.0 {ip}")
+
+
+# =========================================================
+# 4. DEEP BEHAVIORAL ANALYSIS (VIRUSTOTAL API)
+# =========================================================
+# Note: Ensure the API Key is kept secure and not leaked in public repositories
+VT_API_KEY = ""
+target_sha256 = "69c7b3654300bd7f94ba603da9be8f743442dc2e07504685a07f79f1cc318b4c"
+
+def deep_behavior_analysis(hash_code):
+    url = f"https://www.virustotal.com/api/v3/files/{hash_code}/behaviour_summary"
+    headers = {"x-apikey": VT_API_KEY}
+    res = requests.get(url, headers=headers)
+    
+    if res.status_code != 200:
+        return "API Connection Error!"
+        
+    data = res.json().get('data', {})
+    
+    print(f"\n🕵️ EXTRACTING VIDAR RUNTIME BEHAVIOR...")
+    print("-" * 50)
+    
+    # 1. STEALTH TACTICS (Files Opened)
+    print("\n📂 DATA EXFILTRATION TARGETS (Files):")
+    targets = [f for f in data.get('files_opened', []) if any(x in f for x in ['Cookies', 'Login Data', 'Wallet', 'Local Storage'])]
+    for t in targets[:10]:
+        print(f" [🔥] Unauthorized Access: {t}")
+        
+    # 2. SYSTEM COMMANDS (Execution)
+    print("\n💻 COMMAND EXECUTION LOGS:")
+    commands = data.get('command_executions', [])
+    for cmd in commands:
+        print(f" [>] Executed: {cmd}")
+        
+    # 3. PERSISTENCE & TAMPERING (Registry Keys)
+    print("\n🔑 SYSTEM MODIFICATIONS (Registry):")
+    reg = [r for r in data.get('registry_keys_set', []) if "Software\\Microsoft" in r]
+    for r in reg[:5]:
+        print(f" [!] Registry Modified: {r}")
+
+# Execute behavioral analysis
+deep_behavior_analysis(target_sha256)
